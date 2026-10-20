@@ -54,14 +54,16 @@ darnit serve --framework openssf-baseline
 Or configure it as an MCP server in Claude Code:
 
 ```bash
-# Recommended: use darnit's install command (writes ~/.claude.json)
-darnit install --client claude-code
+# Recommended: use darnit's install command (writes ~/.claude.json).
+# --from-source registers this checkout's darnit. Without it the entry runs
+# the darnit-mcp release on PyPI through uvx, not this checkout.
+darnit install --client claude-code --from-source
 
 # Or register manually with the Claude Code CLI
 claude mcp add --scope user darnit -- "$(which darnit)" serve --framework openssf-baseline
 ```
 
-For a project-local MCP config, run `darnit install --project` from the repo root (writes `.mcp.json`).
+`--project` writes the absolute path of this checkout's venv into the repository's `.mcp.json`, so it is not recommended with `--from-source`; see `docs/SECURITY_GUIDE.md` on project-scoped registration.
 
 ## Switching branches
 

@@ -644,6 +644,23 @@ def _install_skills(target_dir: Path, force: bool = False) -> int:
     return installed
 
 
+def _local_darnit_executable() -> Path | None:
+    """Return the darnit console script of the running installation, if any.
+
+    Looks next to the running interpreter first, so the answer is the same
+    whether darnit was started from a virtual environment, through a symlink,
+    or by ``uv run``. Falls back to ``darnit`` on PATH.
+    """
+    import shutil
+
+    name = "darnit.exe" if sys.platform == "win32" else "darnit"
+    candidate = Path(sys.executable).parent / name
+    if candidate.is_file():
+        return candidate
+    found = shutil.which("darnit")
+    return Path(found) if found else None
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     """Install darnit MCP server config and skills into a supported client."""
     import shutil
@@ -658,6 +675,27 @@ def cmd_install(args: argparse.Namespace) -> int:
             "`--project` only applies to Claude Code (writes .mcp.json). "
             f"Ignoring --project for --client {args.client}."
         )
+
+    # Resolve the command first, so a failed lookup writes nothing: no
+    # client directory, no backup of an existing settings file.
+    if getattr(args, "from_source", False):
+        darnit_exe = _local_darnit_executable()
+        if darnit_exe is None:
+            logger.error("--from-source: the darnit executable of this installation was not found.")
+            return 1
+        # Name the framework. Both entries do: `darnit serve` without
+        # --framework took the first installed framework by name until #577,
+        # and the uvx entry runs whatever darnit-mcp release is on PyPI.
+        darnit_entry = {
+            "command": str(darnit_exe),
+            "args": ["serve", "--framework", "openssf-baseline"],
+        }
+    else:
+        darnit_entry = {
+            "command": "uvx",
+            "args": ["--from", "darnit-mcp", "darnit", "serve", "--framework", "openssf-baseline"],
+        }
+    logger.info("Registering MCP server command: %s %s", darnit_entry["command"], " ".join(darnit_entry["args"]))
 
     if args.client in ("claude", "claude-code"):
         if args.project:
@@ -696,10 +734,6 @@ def cmd_install(args: argparse.Namespace) -> int:
         shutil.copy2(settings_path, backup_path)
 
     mcp_servers = config.setdefault("mcpServers", {})
-    darnit_entry = {
-        "command": "uvx",
-        "args": ["--from", "darnit-mcp", "darnit", "serve"],
-    }
 
     if "darnit" in mcp_servers and not args.force:
         response = input(f"'darnit' entry already exists in {settings_path}. Overwrite? [y/N]: ").strip().lower()
@@ -1773,6 +1807,12 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Install skills into .claude/skills/ and MCP config into .mcp.json (per-project) instead of "
              "user-scope paths. Not recommended: the repository then controls how darnit is launched.",
+    )
+    install_parser.add_argument(
+        "--from-source",
+        action="store_true",
+        help="Register the darnit executable of this installation (a source checkout or any other "
+             "non-PyPI install) instead of `uvx --from darnit-mcp`.",
     )
     install_parser.set_defaults(func=cmd_install)
 
