@@ -1686,8 +1686,15 @@ def _outcome_lines(run: RemediationRun, results: list[dict[str, Any]]) -> list[s
         else:
             md += _applied_platform_lines(outcome.change_sets)
         if outcome.recheck is not None:
-            details = f" ({outcome.recheck['details']})" if outcome.recheck.get("details") else ""
-            md.append(f"- **Re-check:** {outcome.recheck.get('status')}{details}")
+            recheck_status = outcome.recheck.get("status")
+            details_str = outcome.recheck.get("details")
+            if recheck_status == "PENDING" and not details_str:
+                if outcome.pending_kind == "llm_judgment":
+                    details_str = "awaiting model judgment"
+                elif outcome.pending_kind == "confirmation":
+                    details_str = "awaiting confirmation"
+            details = f" ({details_str})" if details_str else ""
+            md.append(f"- **Re-check:** {recheck_status}{details}")
         if outcome.reason and outcome.kind != "manual":
             md.append(f"- **Reason:** {outcome.reason}")
         for item in r.get("plan", []):

@@ -179,6 +179,38 @@ class TestRemediationOutcome:
         with pytest.raises(ValidationError):
             RemediationOutcome(control_id="C-1", kind="changed_not_passing", recheck={"status": "FAIL"})
 
+    def test_pending_kind_from_recheck(self) -> None:
+        outcome_llm = RemediationOutcome(
+            control_id="C-1",
+            kind="changed_not_passing",
+            file_changes=[_create()],
+            recheck={"status": "PENDING", "pending": {"kind": "llm_judgment"}},
+        )
+        assert outcome_llm.pending_kind == "llm_judgment"
+
+        outcome_conf = RemediationOutcome(
+            control_id="C-1",
+            kind="changed_not_passing",
+            file_changes=[_create()],
+            recheck={"status": "PENDING", "pending": {"kind": "confirmation"}},
+        )
+        assert outcome_conf.pending_kind == "confirmation"
+
+        outcome_fail = RemediationOutcome(
+            control_id="C-1",
+            kind="changed_not_passing",
+            file_changes=[_create()],
+            recheck={"status": "FAIL"},
+        )
+        assert outcome_fail.pending_kind is None
+
+        outcome_none = RemediationOutcome(
+            control_id="C-1",
+            kind="unchanged",
+            reason="already_exists",
+        )
+        assert outcome_none.pending_kind is None
+
     def test_changed_not_verified_requires_a_change(self) -> None:
         with pytest.raises(ValidationError):
             RemediationOutcome(control_id="C-1", kind="changed_not_verified")

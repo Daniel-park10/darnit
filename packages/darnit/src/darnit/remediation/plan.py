@@ -198,6 +198,15 @@ class RemediationOutcome(BaseModel):
     def changed(self) -> bool:
         return any(c.changes for c in self.file_changes) or any(_change_set_changes(c) for c in self.change_sets)
 
+    @property
+    def pending_kind(self) -> str | None:
+        """The pending.kind ('llm_judgment' or 'confirmation') when re-check is PENDING."""
+        if self.recheck and self.recheck.get("status") == "PENDING":
+            pending = self.recheck.get("pending")
+            if isinstance(pending, dict):
+                return pending.get("kind")
+        return None
+
     @model_validator(mode="after")
     def _kind_matches_evidence(self) -> RemediationOutcome:
         recheck_status = (self.recheck or {}).get("status")

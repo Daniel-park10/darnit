@@ -4,7 +4,7 @@ description: Run the full compliance pipeline — audit, collect data, remediate
 compatibility: Requires darnit MCP server running (darnit serve) and gh CLI for PR creation
 metadata:
   author: kusari-oss
-  version: "2.1"
+  version: "2.2"
 ---
 
 # Full Compliance Pipeline
@@ -40,7 +40,7 @@ If there are FAIL controls with auto-fixes:
 - Present every file change; every platform change set with each field as `before -> after`, its `impact_notes`, and its digest; and every item that needs individual approval. Show a high-impact change (repository visibility, organization settings) on its own with its impact
 - Ask the person which changes to apply, asking separately about each platform change set and each item that needs individual approval
 
-If no failures or no auto-fixes: report the status and list manual steps. Skip to step 6.
+If no failures or no auto-fixes: report the status and list manual steps. Skip to step 7.
 
 ### 4. Apply fixes (if confirmed)
 
@@ -64,7 +64,17 @@ Read the generated template files and improve them with project-specific content
 
 If files were enhanced, make a new commit with the improvements.
 
-### 6. Create PR and final report
+### 6. Post-remediation judgments and confirmation
+
+Document controls created or modified by remediation (such as `SUPPORT.md`, `GOVERNANCE.md`, `CONTRIBUTING.md`, `CODEOWNERS`, threat models, or `SECURITY.md`) re-check as `PENDING` (`pending.kind = "llm_judgment"` or outcome `changed_not_passing` awaiting judgment) because document content passes only as a PASS candidate from a model judgment that the person confirms (framework-design 3.0.1-3.0.2, 15):
+
+- **Re-audit the remediated controls**: Call the audit tool with `output_format: "summary"` (or `output_format: "json"` to see `evidence.llm_consultation` files) for the remediated controls.
+- **Submit judgments**: For each remediated control left `PENDING` with `pending.kind = "llm_judgment"`, read the prompt and the file contents from `evidence.llm_consultation.file_contents`. Call `submit_judgment` with `control_id`, `verdict: "pass"`, `reasoning`, and `cited_evidence` copied verbatim from the generated/enhanced file, passing `owner`, `repo`, and `local_path`.
+- **Offer PASS candidates to the person**: Verified positive judgments become PASS candidates (`pending.kind = "confirmation"`). Present each PASS candidate to the person with its quoted evidence, and ask whether they confirm it.
+- **Confirm candidates**: Call `confirm_pass_candidate(control_ids=[...], owner=..., repo=...)` (or `confirm_project_data(confirm_pass_candidate=[...])`) ONLY for the candidates the person explicitly confirms. Never confirm on your own judgment or without explicit instruction.
+- **Verify final state**: Run the audit tool again to verify that the confirmed controls now conclude `PASS` with `authority: "asserted"` and `concluded_by: "confirmation"`.
+
+### 7. Create PR and final report
 
 Ask if the user wants a PR. If yes, call `create_remediation_pr` and display the URL.
 

@@ -307,3 +307,27 @@ def test_individually_approved_item_is_applied_and_recorded(repo: Path, unsafe_f
     assert outcome["kind"] == "fixed"
     assert (repo / "UNSAFE.md").read_text(encoding="utf-8") == "# UNSAFE.md\n"
     assert [a["digest"] for a in run["approvals"]] == [digest]
+
+
+@pytest.mark.integration
+def test_recheck_pending_carries_pending_kind(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a remediated control's recheck ends PENDING, outcome is changed_not_passing and carries pending.kind."""
+    def pending_audit(*_a, **_k):
+        return [
+            {
+                "id": "T-CONTRIB",
+                "status": "PENDING",
+                "details": "LLM consultation required",
+                "pending": {"kind": "llm_judgment"},
+            }
+        ], {}
+
+    monkeypatch.setattr(audit, "run_sieve_audit", pending_audit)
+
+    output, run = _apply(repo)
+    [contrib] = [o for o in run["outcomes"] if o["control_id"] == "T-CONTRIB"]
+    assert contrib["kind"] == "changed_not_passing"
+    assert contrib["recheck"]["status"] == "PENDING"
+    assert contrib["recheck"]["pending"] == {"kind": "llm_judgment"}
+    report = output.split("```json")[0]
+    assert "- **Re-check:** PENDING (LLM consultation required)" in report

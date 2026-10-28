@@ -2250,11 +2250,16 @@ plan -> [confirmation missing]            -> needs_confirmation
 
 ### 15.5 Re-check
 
-After an apply that changed something, darnit re-checks the affected controls with `run_sieve_audit(controls=<affected>, write_cache=False)`: a subset audit through the canonical pipeline (section 10.1) that does not write the audit cache (section 10.4). The sieve is unchanged. A re-check PASS gives `fixed`; FAIL, WARN, or PENDING (including a PASS candidate) gives `changed_not_passing`; ERROR, or a re-check that could not run, gives `changed_not_verified` with the error. A control whose remediation changed nothing is not re-checked and is never `fixed`.
+After an apply that changed something, darnit re-checks the affected controls with `run_sieve_audit(controls=<affected>, write_cache=False)`: a subset audit through the canonical pipeline (section 10.1) that does not write the audit cache (section 10.4). The sieve is unchanged. A re-check PASS gives `fixed`; FAIL, WARN, or PENDING (including a PASS candidate) gives `changed_not_passing`; ERROR, or a re-check that could not run, gives `changed_not_verified` with the error. A control whose remediation changed nothing is not re-checked and is never `fixed`. When a re-check ends PENDING (for example, a created document whose content requires model consultation or confirmation, sections 3.0.1-3.0.2), the `changed_not_passing` outcome carries the re-check's `pending.kind` (`llm_judgment` or `confirmation`) so reports and commit/PR gates distinguish awaiting judgment or confirmation from a fix that failed.
 
 #### Scenario: Changed but still failing
 - **WHEN** a remediation changed a file and the re-check of its control is FAIL
 - **THEN** the outcome MUST be `changed_not_passing` with the re-check result
+
+#### Scenario: Remediated document awaiting judgment or confirmation
+- **WHEN** a remediation changed a file and the re-check of its control ends PENDING
+- **THEN** the outcome MUST be `changed_not_passing`
+- **AND** the re-check result MUST carry `pending.kind`
 
 #### Scenario: Re-check lookup fails
 - **WHEN** the re-check needs a platform lookup that fails
@@ -2321,7 +2326,7 @@ Every writer goes through the executor, the platform engine, and the run manifes
 | `create_security_policy` | Writes through the executor and the manifest; keeps its explicit-create semantics |
 | `generate_threat_model` | Without `output_path`, returns the threat model and writes nothing. With `output_path`, the call is the request to write (explicit-create semantics, as for `create_security_policy`): the path must be repository-relative, without `..` or `.git` (normalized like a `FileChange` path) and inside the repository after `realpath`, else nothing is written. The files are written through the executor as `file_create` steps, recorded in the run manifest (so the git tools commit them), and the response names the run id. A missing file is created; an existing file is replaced only when git tracks it and it has no uncommitted changes, and is otherwise left as it is and reported |
 | `darnit run` | Previews by default; creates or changes files, or platform settings, only with `--apply` (FR-027). In an apply, platform changes follow the policy; under `prompt` with a terminal it asks on `/dev/tty`, otherwise the outcome is `needs_approval`. A plan item that requires individual approval (15.3) is shown on `/dev/tty` with its files (the full content of a created file; for a modified file, a unified diff of the current file against the resulting content, or the full resulting content when the current file cannot be read; never truncated, and escaped to printable ASCII, with lines split only at `\n`, every other line ending or separator (`\r`, form feed, `\x1c`, U+2028) shown escaped, and a missing final newline marked `\ No newline at end of file`, so a change only in whitespace or line endings is never an empty diff), commands, change sets, the reason it needs approval, and its `PlanItem.digest`, and runs only on the person's yes; with no terminal it ends as `needs_approval` |
-| Skills (`darnit-remediate`, `darnit-comply`) | Show the preview with before/after fields, impact notes, and digests; pass back only the digests the person approved; never pass `dry_run = false` as a substitute for approval |
+| Skills (`darnit-remediate`, `darnit-comply`) | Show the preview with before/after fields, impact notes, and digests; pass back only the digests the person approved; never pass `dry_run = false` as a substitute for approval. In the comply flow, after enhancing generated files, re-audit remediated controls, submit judgments for controls left PENDING, offer resulting PASS candidates with quoted evidence for the person's confirmation, and confirm via `confirm_pass_candidate` only those the person approves before the final audit |
 
 The `confirm_*` tools are unchanged; approvals are not confirmations. Audit results and the attestation predicate are unchanged.
 
