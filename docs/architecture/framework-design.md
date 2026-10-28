@@ -205,6 +205,12 @@ A WARN counts as FAIL for compliance calculations (Constitution Principle II), w
 - **THEN** the orchestrator MUST NOT conclude the control
 - **AND** it MUST attach evidence and continue, or terminate INCONCLUSIVE if this was the last step
 
+#### Scenario: All passes inconclusive falls through to WARN
+- **WHEN** no pass concludes a control
+- **THEN** the control MUST be WARN with authority `suggestive`
+- **AND** the result message MUST carry the last informative step message (annotated with `(evidence only)` when the step ran as evidence only)
+- **AND** when no informative step ran, it MUST report `Could not automatically verify - manual verification required`
+
 ### 3.0.1 Step Ceilings and Declarations
 
 Every step type registers a **ceiling**: the set of outcomes (`pass`, `fail`) it can at most conclude. Presence and pattern step types also register an **existence ceiling**, used when a step declares that its control's requirement is literally about existence.
