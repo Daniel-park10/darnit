@@ -367,6 +367,8 @@ class SieveOrchestrator:
         accumulated_evidence: dict[str, Any] = {}
         last_error_class: str | None = None
         first_error: dict[str, Any] | None = None
+        last_informative_message: str | None = None
+        last_informative_evidence_only: bool = False
 
         # Build handler context
         handler_ctx = HandlerContext(
@@ -643,6 +645,26 @@ class SieveOrchestrator:
                     }
                 continue
 
+            # Issue #648: remember the last informative step message for the
+            # all-inconclusive WARN fallthrough below. Manual passes are excluded
+            # via handler and phase checks.
+            msg = handler_result.message
+            if (
+                invocation.handler not in ("manual", "manual_steps")
+                and phase != VerificationPhase.MANUAL
+                and msg
+                and msg.strip()
+            ):
+                last_informative_message = msg.strip()
+                last_informative_evidence_only = (
+                    disposition
+                    in (
+                        StepDisposition.ATTACH_EVIDENCE_AND_CONTINUE,
+                        StepDisposition.TERMINATE_INCONCLUSIVE,
+                    )
+                    and handler_result.status != HandlerResultStatus.INCONCLUSIVE
+                )
+
             # ATTACH_EVIDENCE_AND_CONTINUE or TERMINATE_INCONCLUSIVE fall
             # through to the LLM-consultation / continue path below.
 
@@ -695,11 +717,19 @@ class SieveOrchestrator:
                 },
             )
 
-        # All handler invocations inconclusive
+        # All handler invocations inconclusive (issue #648)
+        if last_informative_message:
+            if last_informative_evidence_only and not last_informative_message.endswith("(evidence only)"):
+                message = f"{last_informative_message} (evidence only)"
+            else:
+                message = last_informative_message
+        else:
+            message = "Could not automatically verify - manual verification required"
+
         return SieveResult(
             control_id=control_spec.control_id,
             status="WARN",
-            message="Could not automatically verify - manual verification required",
+            message=message,
             level=control_spec.level,
             conclusive_phase=VerificationPhase.MANUAL,
             pass_history=pass_history,
