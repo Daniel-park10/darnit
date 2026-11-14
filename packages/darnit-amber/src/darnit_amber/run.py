@@ -20,7 +20,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.error
+import urllib.request
+import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, localcontext
@@ -172,6 +176,111 @@ def public_url(url: str) -> str:
     return urlunsplit((p.scheme, host, p.path, "", ""))
 
 
+ARCHIVE_EXTENSIONS = (
+    ".zip",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+    ".tar",
+)
+
+
+def _is_archive_name(name: str) -> bool:
+    name_lower = name.lower()
+    return any(name_lower.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
+
+
+def _is_archive_url(url: str) -> bool:
+    if not url.startswith(("https://", "http://")):
+        return False
+    path = urlsplit(url).path
+    return _is_archive_name(path)
+
+
+def _is_archive(artifact: str) -> bool:
+    if _is_archive_url(artifact):
+        return True
+    if not _is_url(artifact):
+        p = Path(artifact)
+        return _is_archive_name(p.name)
+    return False
+
+
+def _read_archive(path: Path) -> tuple[Path, str]:
+    if not path.is_file():
+        raise RunError(f"archive file not found: {path}")
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return path, h.hexdigest()
+
+
+def _download_archive(url: str, dest: Path, max_size: int = 500 * 1024 * 1024) -> tuple[Path, str]:
+    """Download an archive from ``url`` to ``dest``, returning (path, sha256)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "darnit-amber"})
+    h = hashlib.sha256()
+    size = 0
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
+            while chunk := resp.read(65536):
+                size += len(chunk)
+                if size > max_size:
+                    raise RunError(f"archive at {url} exceeds maximum size ({max_size} bytes)")
+                h.update(chunk)
+                out.write(chunk)
+    except urllib.error.URLError as e:
+        raise RunError(f"failed to download archive from {url}: {e.reason}") from e
+    except OSError as e:
+        raise RunError(f"failed to download archive from {url}: {e}") from e
+    return dest, h.hexdigest()
+
+
+def _unpack_archive(archive_path: Path, dest: Path) -> None:
+    """Extract ``archive_path`` into directory ``dest`` with path traversal protection."""
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
+    name_lower = archive_path.name.lower()
+
+    if name_lower.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(archive_path) as z:
+                for member in z.infolist():
+                    target = (dest / member.filename).resolve()
+                    if not target.is_relative_to(dest_resolved):
+                        raise RunError(
+                            f"archive member {member.filename!r} attempts directory traversal outside destination"
+                        )
+                z.extractall(dest)
+        except zipfile.BadZipFile as e:
+            raise RunError(f"corrupt or invalid zip archive {archive_path.name}: {e}") from e
+
+    elif any(name_lower.endswith(ext) for ext in (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
+        try:
+            with tarfile.open(archive_path) as t:
+                if hasattr(tarfile, "data_filter"):
+                    t.extractall(dest, filter="data")
+                else:
+                    for member in t.getmembers():
+                        target = (dest / member.name).resolve()
+                        if not target.is_relative_to(dest_resolved):
+                            raise RunError(
+                                f"archive member {member.name!r} attempts directory traversal outside destination"
+                            )
+                        if member.issym() or member.islnk():
+                            link_target = (dest / member.linkname).resolve()
+                            if not link_target.is_relative_to(dest_resolved):
+                                raise RunError(f"archive member {member.name!r} links outside destination")
+                    t.extractall(dest)
+        except (tarfile.TarError, EOFError) as e:
+            raise RunError(f"corrupt or invalid tar archive {archive_path.name}: {e}") from e
+    else:
+        raise RunError(f"unsupported archive format for {archive_path.name}")
+
+
 def _clone(url: str, ref: str | None, dest: Path, keep_remote: bool = True) -> Path:
     r = subprocess.run(["git", "clone", "-q", url, str(dest)], capture_output=True, text=True)
     if r.returncode != 0:
@@ -274,10 +383,11 @@ def _scrub_path(value: str, checkout: Path | None) -> str:
 def _environment(checkout: Path | None = None) -> dict[str, Any]:
     """What darnit-amber asked the host and wrote down. Not observed by Witness; see ``provenance``."""
     mem = None
-    try:
-        mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError):
-        pass
+    if hasattr(os, "sysconf"):
+        try:
+            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (ValueError, OSError, AttributeError):
+            pass
     variables = {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ}
     for k in _PATH_VARIABLES:
         if k in variables:
@@ -564,14 +674,14 @@ def _witness(
     cwd: Path,
     cmd: list[str],
     tsa: str | None = TSA_URL,
+    attestors: str = WITNESS_ATTESTORS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     full = [
         _witness_bin(),
         "run",
         "--step",
         step,
-        "--attestations",
-        WITNESS_ATTESTORS,
+        *(["--attestations", attestors] if attestors else []),
         *_signer_args(key),
         *(["-t", tsa] if tsa else []),  # RFC 3161 countersignature: proves when the signature existed
         "-o",
@@ -695,6 +805,7 @@ def execute(
     rerun_of: dict[str, Any] | None = None,
     tsa: str | None = TSA_URL,
     allow_dirty: bool = False,
+    archive_file: Path | None = None,
 ) -> dict[str, Any]:
     """Run, sign, store.
 
@@ -702,10 +813,12 @@ def execute(
     goes into the predicate before the id is computed, so one bundle is
     written, with its outputs under that id. A URL, and a local path that is
     clean or run at a named ``ref``, is executed from a fresh clone of the
-    commit; only ``allow_dirty`` runs a working tree in place.
+    commit; only ``allow_dirty`` runs a working tree in place. Archive
+    artifacts (.zip, .tar.gz) are downloaded or read, hashed as sha256,
+    and unpacked into a fresh checkout without git.
     """
-    darnit_bin = Path(sys.executable).parent / "darnit"
-    if not darnit_bin.exists():
+    darnit_bin = Path(sys.executable).parent / ("darnit.exe" if sys.platform == "win32" else "darnit")
+    if not darnit_bin.exists() and not (Path(sys.executable).parent / "darnit").exists():
         raise RunError(f"darnit CLI not found next to {sys.executable}")
     key = key or default_key()
     exp_cmd = (entry.get("run") or {}).get("command")
@@ -717,12 +830,35 @@ def execute(
         tmpdir = Path(tmp)
         dirty: list[str] = []
         local_name: str | None = None
-        if _is_url(artifact):
+        is_archive = _is_archive(artifact)
+        archive_sha256: str | None = None
+
+        if is_archive:
+            if ref is not None:
+                raise RunError("--ref is not supported for archive artifacts")
+            if _is_archive_url(artifact):
+                if archive_file is not None and archive_file.is_file():
+                    arc_path = archive_file
+                    archive_sha256 = _read_archive(arc_path)[1]
+                else:
+                    url_fname = Path(urlsplit(artifact).path).name or "archive.zip"
+                    arc_path, archive_sha256 = _download_archive(artifact, tmpdir / url_fname)
+                subject_name = public_url(artifact)
+            else:
+                source = Path(artifact).resolve()
+                arc_path, archive_sha256 = _read_archive(source)
+                subject_name = f"local/{source.name}"
+            repo = tmpdir / "artifact"
+            _unpack_archive(arc_path, repo)
+            commit = None
+        elif _is_url(artifact):
             repo = _clone(artifact, ref, tmpdir / "artifact")
+            commit = _git_commit(repo)
+            subject_name = public_url(artifact)
         else:
             source = Path(artifact).resolve()
             if not source.is_dir():
-                raise RunError(f"{artifact} is not a directory")
+                raise RunError(f"{artifact} is not a directory or archive file")
             local_name = _git_remote(source) or _local_subject(source)
             if ref is None:  # a run at HEAD; at a named commit the clone below contains exactly that commit
                 dirty = _git_dirty(source)
@@ -739,12 +875,15 @@ def execute(
                 # (caches, data, precomputed results) are not there, so the experiment reads
                 # only what the commit contains. The same path rerun takes.
                 repo = _clone(str(source), ref, tmpdir / "artifact", keep_remote=False)
+            commit = None if dirty else _git_commit(repo)
+            subject_name = public_url(local_name or _local_subject(repo))
         started = datetime.now(UTC).isoformat()
 
         record_dir = repo / RECORD_DIR
         # The record dir is removed after each step, success or failure: nothing of darnit's is left for the
         # experiment to read, or in the user's checkout when --allow-dirty ran in place.
         record_dir.mkdir()
+        attestors = "" if is_archive else WITNESS_ATTESTORS
         try:
             audit_env, audit_w = _witness(
                 "amber-audit",
@@ -753,6 +892,7 @@ def execute(
                 repo,
                 ["sh", "-c", audit_command()],  # darnit: on PATH, see _witness_env
                 tsa,
+                attestors=attestors,
             )
             audit_blob, audit_record = _record(repo, AUDIT_RECORD, audit_w, "the audit report")
         finally:
@@ -773,6 +913,7 @@ def execute(
                     repo,
                     ["sh", "-c", wrap_command(exp_cmd), EXIT_RECORD],
                     tsa,
+                    attestors=attestors,
                 )
                 exit_blob, exit_record = _record(repo, EXIT_RECORD, exp_w, "the experiment's exit status")
             finally:
@@ -814,8 +955,16 @@ def execute(
             c["signed_by"] = "signing"  # the run's signer stands behind this claim; claim() marks its own
         for c in claims:
             c["matches_expected"] = (c["verdict"] == c["expected_verdict"]) if c.get("expected_verdict") else None
-        commit = None if dirty else _git_commit(repo)
-        subject_name = public_url(artifact if _is_url(artifact) else local_name or _local_subject(repo))
+        if not is_archive:
+            commit = None if dirty else _git_commit(repo)
+            subject_name = public_url(artifact if _is_url(artifact) else local_name or _local_subject(repo))
+
+        if is_archive:
+            artifact_entry = {"archive": subject_name, "sha256": archive_sha256}
+            subject_digest = {"sha256": archive_sha256}
+        else:
+            artifact_entry = {"clone": subject_name, "ref": commit, "dirty": bool(dirty)}
+            subject_digest = {"gitCommit": commit} if commit else {}
 
         envelopes = {"amber-audit": audit_env, **({"experiment": exp_env} if exp_env else {})}
         signing = _signing(key, tsa)
@@ -845,7 +994,7 @@ def execute(
             "corpus_entry": entry.get("id"),
             "entry": {
                 "source": entry.get("_source", "file"),
-                "artifact": {"clone": subject_name, "ref": commit, "dirty": bool(dirty)},
+                "artifact": artifact_entry,
                 "run": {"command": exp_cmd, "outputs": exp_outputs},
                 "environment": entry.get("environment"),
             },
@@ -868,7 +1017,7 @@ def execute(
         }
         statement = {
             "_type": STATEMENT_TYPE,
-            "subject": [{"name": subject_name, "digest": {"gitCommit": commit} if commit else {}}],
+            "subject": [{"name": subject_name, "digest": subject_digest}],
             "predicateType": PREDICATE_TYPE,
             "predicate": predicate,
         }
@@ -900,9 +1049,15 @@ def run(
 ) -> dict[str, Any]:
     """``command`` (argv after ``--``) overrides the entry's run.command; with no entry, everything else is inferred."""
     entry = load_entry(claims)
-    if artifact in (".", "") and (entry.get("artifact") or {}).get("clone"):
-        artifact = entry["artifact"]["clone"]
-        ref = ref or entry["artifact"].get("ref")
+    if artifact in (".", ""):
+        art = entry.get("artifact") or {}
+        if art.get("archive"):
+            artifact = art["archive"]
+        elif art.get("url") and _is_archive(art["url"]):
+            artifact = art["url"]
+        elif art.get("clone"):
+            artifact = art["clone"]
+            ref = ref or art.get("ref")
     if command:
         entry = {**entry, "run": {**(entry.get("run") or {}), "command": shlex.join(command)}}
         if not claims:

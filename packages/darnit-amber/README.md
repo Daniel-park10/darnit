@@ -40,7 +40,8 @@ darnit-amber run -- ./run_experiment.sh
 darnit runs the Amber audit and the command under CNCF Witness and stores
 a signed **run bundle**: which repository and commit (from git; a checkout
 with uncommitted changes or untracked files is refused unless
-`--allow-dirty`, and then no commit is recorded), the exact command and its
+`--allow-dirty`, and then no commit is recorded; or the SHA-256 digest of an
+archive artifact such as a Zenodo zip or tarball), the exact command and its
 exit status (a failing experiment is a result, so it still gets a bundle),
 the environment (Python, OS, CPU and memory, and an allowlist of variables
 such as `LANG`, `OMP_NUM_THREADS` and `CUDA_VISIBLE_DEVICES`; never the
@@ -98,9 +99,10 @@ darnit-amber rerun  <bundle id> --pubkey key.pub      # verify, then: same commi
 not verify. It then prints the command and asks, because the command runs
 **on this machine, as this user, with this environment, in no container**
 (darnit #677 step B adds the container); `--yes` answers for a script. The
-artifact is cloned at the recorded commit, never run in place; a bundle
-made from a local path without a remote names it `local/<directory name>`
-and records no path, so `rerun` then needs `--artifact` with a clone. It
+artifact is cloned at the recorded commit, or fetched and verified against its
+recorded SHA-256 for an archive artifact, never run in place; a bundle
+made from a local path without a remote names it `local/<name>`
+and records no path, so `rerun` then needs `--artifact` with a clone or archive file. It
 reports the exit status of both runs, per claim the first value and the
 new one with both verdicts, and per output path of either run whether the
 file is identical, changed, added or missing. `drift` is true when the
@@ -165,7 +167,7 @@ The same information can be given up front as a YAML (or JSON) entry with
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | yes | Short name, recorded in the bundle as `corpus_entry` |
-| `artifact.clone`, `artifact.ref` | yes | Git URL and commit; `run` checks out exactly that commit |
+| `artifact.clone`, `artifact.ref` | yes (or archive) | Git URL and commit, or `artifact.archive` for an archive artifact |
 | `environment` | when the experiment needs an image | See below |
 | `run.command` | for an experiment step | Shell (`sh -c`) run inside the checkout under Witness |
 | `run.outputs` | with `run.command` | Files the command writes; their digests go into the bundle |

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .dsse import pae as _pae
 from .dsse import verify_with
@@ -17,7 +18,10 @@ from .run import (
     TSA_URL,
     RunError,
     _canonical,
+    _download_archive,
+    _is_archive_url,
     _is_url,
+    _read_archive,
     audit_command,
     audit_results,
     execute,
@@ -390,18 +394,49 @@ def rerun(
     if not exp:
         raise RunError("bundle has no experiment to rerun")
     subject = stmt["subject"][0]["name"]
-    commit = stmt["subject"][0]["digest"].get("gitCommit")
-    if not commit:
-        raise RunError("bundle records no commit (run with --allow-dirty), so there is nothing to rerun at")
-    if artifact is None:
-        artifact = subject
-    if not _is_url(artifact) and not Path(artifact).is_dir():
-        raise RunError(
-            f"the bundle names {subject}, which is not a URL; pass --artifact with the path or URL of a clone"
-            if artifact == subject
-            else f"{artifact} is not a directory"
-        )
+    digest = stmt["subject"][0].get("digest", {})
+    commit = digest.get("gitCommit")
+    archive_sha = digest.get("sha256")
+    if not commit and not archive_sha:
+        raise RunError("bundle records neither a commit nor an archive digest, so there is nothing to rerun at")
+
+    archive_file: Path | None = None
+    dl_dir: Any = None
+    if archive_sha:
+        if artifact is None:
+            artifact = subject
+        if not _is_url(artifact) and not Path(artifact).is_file():
+            raise RunError(
+                f"the bundle names {subject}, which is not a URL; pass --artifact with the path or URL of an archive"
+                if artifact == subject
+                else f"{artifact} is not an archive file"
+            )
+        if _is_archive_url(artifact):
+            import tempfile
+
+            dl_dir = tempfile.TemporaryDirectory(prefix="amber-rerun-archive-")
+            url_fname = Path(urlsplit(artifact).path).name or "archive.zip"
+            archive_file, fetched_sha = _download_archive(artifact, Path(dl_dir.name) / url_fname)
+        else:
+            archive_file, fetched_sha = _read_archive(Path(artifact).resolve())
+
+        if fetched_sha != archive_sha:
+            if dl_dir is not None:
+                dl_dir.cleanup()
+            raise RunError(f"archive digest {fetched_sha} does not match statement digest {archive_sha}")
+    else:
+        if artifact is None:
+            artifact = subject
+        if not _is_url(artifact) and not Path(artifact).is_dir():
+            raise RunError(
+                f"the bundle names {subject}, which is not a URL; pass --artifact with the path or URL of a clone"
+                if artifact == subject
+                else f"{artifact} is not a directory"
+            )
+
     if consent is None or not consent(exp["command"]):
+        if dl_dir is not None:
+            dl_dir.cleanup()
         raise RunError("rerun not confirmed")
     entry = {
         "id": pred.get("corpus_entry"),
@@ -410,15 +445,20 @@ def rerun(
             {k: v for k, v in c.items() if k not in ("measured", "verdict", "reason")} for c in pred.get("claims") or []
         ],
     }
-    new = execute(
-        artifact,
-        commit,
-        key,
-        entry,
-        store,
-        rerun_of=first,
-        tsa=tsa,
-    )
+    try:
+        new = execute(
+            artifact,
+            commit,
+            key,
+            entry,
+            store,
+            rerun_of=first,
+            tsa=tsa,
+            archive_file=archive_file,
+        )
+    finally:
+        if dl_dir is not None:
+            dl_dir.cleanup()
     new_pred = new["statement"]["predicate"]
     comparison = new_pred["reruns"]
     return {

@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `darnit-amber run` accepts an archive artifact (Zenodo zip, tarball) via URL or
+  local path, recording the archive sha256 as subject digest instead of a git
+  commit, unpacking safely into the checkout directory, and skipping Witness's
+  git attestor while keeping material and product attestors active; `darnit-amber rerun`
+  fetches and verifies the archive digest against the recorded statement, refusing to
+  execute if the digest differs (fixes #746).
 - `darnit-amber run`, `verify`, `claim` and `rerun` (#677 steps A, C, D; #678;
   specs/046-amber-run-bundle): one execution of an artifact's experiment under
   Witness becomes a signed run bundle (statement signed as DSSE with the
