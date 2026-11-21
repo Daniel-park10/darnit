@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1382,6 +1383,9 @@ def remediate_audit_findings(
     enhance_with_llm: bool = False,
     approve: list | None = None,
     host: str | None = None,
+    run_id: str | None = None,
+    previewed_digests: list | None = None,
+    previewed_plan: Sequence[Any] | None = None,
 ) -> str:
     """
     Apply automated remediations for failed audit controls.
@@ -1471,7 +1475,7 @@ def remediate_audit_findings(
     from darnit.remediation import git_state, manifest
     from darnit.server.tools import git_operations
 
-    run_id = manifest.new_run_id()
+    run_id = run_id or manifest.new_run_id()
 
     # Feature 043 (FR-013): a requested git step is checked before any
     # remediation is applied; an unsafe repository state changes nothing.
@@ -1503,6 +1507,8 @@ def remediate_audit_findings(
             enhance_with_llm=enhance_with_llm,
             approve=approve,
             run_id=run_id,
+            previewed_digests=previewed_digests,
+            previewed_plan=previewed_plan,
         )
     except Exception as e:
         return f"Error applying remediations: {e}"

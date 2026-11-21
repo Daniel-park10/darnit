@@ -37,10 +37,10 @@ import os
 import stat
 import subprocess
 import tempfile
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -78,6 +78,11 @@ class ConfirmationRequired(Exception):
 
 class WriteRefused(Exception):
     """The executor did not write a planned change; nothing was written for it."""
+
+
+class _PreviewMismatch(NamedTuple):
+    message: str
+    refused: list[str]
 
 
 class GuardedContext(Mapping[str, Any]):
@@ -136,6 +141,7 @@ class RemediationResult:
     # ``approvals`` are the individual approvals the apply used.
     needs_approval: list[str] = field(default_factory=list)
     approvals: list[Approval] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
 
 
 class RemediationExecutor:
@@ -182,6 +188,8 @@ class RemediationExecutor:
         approvals: Collection[str] = (),
         item_approver: ItemApprover | None = None,
         host: str | None = None,
+        previewed_digests: Collection[str] | Mapping[str, str] | None = None,
+        previewed_plan: Sequence[PlanItem] | None = None,
     ):
         """Initialize the executor.
 
@@ -245,6 +253,15 @@ class RemediationExecutor:
         self._item_approver = item_approver
         self._granted: dict[str, Approval] = {}
         self._in_git: bool | None = None
+        self._previewed_digests: frozenset[str] | Mapping[str, str] | None = (
+            frozenset(previewed_digests)
+            if isinstance(previewed_digests, (set, list, tuple, frozenset))
+            else previewed_digests
+        )
+        self._previewed_by_control: dict[str, dict[str, PlanItem]] = {}
+        if previewed_plan:
+            for item in previewed_plan:
+                self._previewed_by_control.setdefault(item.control_id, {})[item.step] = item
 
         # Auto-detect owner/repo if not provided
         if not owner or not repo:
@@ -451,6 +468,8 @@ class RemediationExecutor:
         control_id: str,
         config: RemediationConfig,
         dry_run: bool = True,
+        previewed_plan: Sequence[PlanItem] | None = None,
+        previewed_digests: Collection[str] | Mapping[str, str] | None = None,
     ) -> RemediationResult:
         """Preview (``dry_run=True``) or apply a remediation.
 
@@ -480,6 +499,10 @@ class RemediationExecutor:
 
         try:
             planned = self._run_steps(control_id, config, "plan")
+            if config.project_update and config.project_update.set:
+                self._project_update(control_id, config.project_update, planned)
+            if dry_run:
+                self._previewed_by_control[control_id] = {item.step: item for item in planned.plan}
             if not dry_run and planned.details.get("missing_handlers"):
                 return RemediationResult(
                     success=False,
@@ -490,6 +513,20 @@ class RemediationExecutor:
                     details=planned.details,
                     plan=planned.plan,
                 )
+            if not dry_run:
+                mismatch = self._check_preview_match(control_id, planned.plan, previewed_plan, previewed_digests)
+                if mismatch is not None:
+                    return RemediationResult(
+                        success=False,
+                        message=mismatch.message,
+                        control_id=control_id,
+                        remediation_type="handler_pipeline",
+                        dry_run=False,
+                        changed=False,
+                        refused=mismatch.refused,
+                        details={"refused": mismatch.refused, "reason": "stale_preview"},
+                        plan=planned.plan,
+                    )
             if not dry_run and (unapproved := self._unapproved(planned.plan, config.safe)):
                 return RemediationResult(
                     success=False,
@@ -530,6 +567,81 @@ class RemediationExecutor:
                 clear_dir_entries_cache()
 
         return result
+
+    def _check_preview_match(
+        self,
+        control_id: str,
+        fresh_plan: Sequence[PlanItem],
+        explicit_plan: Sequence[PlanItem] | None = None,
+        explicit_digests: Collection[str] | Mapping[str, str] | None = None,
+    ) -> _PreviewMismatch | None:
+        preview_items: dict[str, PlanItem] | None = None
+        if explicit_plan is not None:
+            preview_items = {item.step: item for item in explicit_plan if item.control_id == control_id}
+        elif control_id in self._previewed_by_control:
+            preview_items = self._previewed_by_control[control_id]
+
+        digests_filter = explicit_digests if explicit_digests is not None else self._previewed_digests
+
+        previewable_fresh = [item for item in fresh_plan if item.previewable]
+        if not previewable_fresh:
+            return None
+
+        if preview_items is not None:
+            for item in previewable_fresh:
+                prev_item = preview_items.get(item.step)
+                if prev_item is None:
+                    return _PreviewMismatch(
+                        message=f"Plan item for {control_id} ({item.step}) was not in previewed plan; re-run preview",
+                        refused=[item.digest],
+                    )
+                if item.digest != prev_item.digest:
+                    return _PreviewMismatch(
+                        message=(
+                            f"Previewed plan item for {control_id} ({item.step}) changed since preview "
+                            f"(digest {prev_item.digest} != {item.digest}); re-run preview"
+                        ),
+                        refused=[item.digest],
+                    )
+            previewable_prev = {step: it for step, it in preview_items.items() if it.previewable}
+            fresh_steps = {item.step for item in fresh_plan}
+            for step, prev_item in previewable_prev.items():
+                if step not in fresh_steps:
+                    return _PreviewMismatch(
+                        message=f"Previewed plan item for {control_id} ({step}) is missing from fresh plan; re-run preview",
+                        refused=[prev_item.digest],
+                    )
+            return None
+
+        if digests_filter is not None:
+            if isinstance(digests_filter, Mapping):
+                for item in previewable_fresh:
+                    expected = (
+                        digests_filter.get(item.step)
+                        or digests_filter.get(f"{control_id}:{item.step}")
+                        or digests_filter.get(item.digest)
+                    )
+                    if expected is not None and expected != item.digest:
+                        return _PreviewMismatch(
+                            message=(
+                                f"Previewed plan item for {control_id} ({item.step}) changed since preview "
+                                f"(digest {expected} != {item.digest}); re-run preview"
+                            ),
+                            refused=[item.digest],
+                        )
+            else:
+                for item in previewable_fresh:
+                    if item.digest not in digests_filter:
+                        return _PreviewMismatch(
+                            message=(
+                                f"Plan item for {control_id} ({item.step}) digest {item.digest} "
+                                "was not in previewed digests; re-run preview"
+                            ),
+                            refused=[item.digest],
+                        )
+            return None
+
+        return None
 
     def _approved_digests(self) -> frozenset[str]:
         platform = self.platform.approvals if self.platform is not None else frozenset()
